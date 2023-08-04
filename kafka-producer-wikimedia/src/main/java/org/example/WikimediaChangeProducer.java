@@ -14,8 +14,6 @@ import java.util.concurrent.TimeUnit;
 public class WikimediaChangeProducer {
 
     public static void main(String[] args) throws InterruptedException {
-        System.out.println("Hello world!");
-
         try (BackgroundEventSource eventSource = getEventSource()) {
             eventSource.start();
             TimeUnit.MINUTES.sleep(10);
