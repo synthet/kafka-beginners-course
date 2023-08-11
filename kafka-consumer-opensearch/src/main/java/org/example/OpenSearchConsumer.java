@@ -1,10 +1,15 @@
 package org.example;
 
+import com.google.gson.JsonParser;
 import org.apache.http.HttpHost;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.opensearch.action.bulk.BulkRequest;
+import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
@@ -28,8 +33,23 @@ public class OpenSearchConsumer {
     private static final String INDEX_NAME = "wikimedia";
 
     public static void main(String[] args) {
-        try (RestHighLevelClient openSearchClient = createOpenSearchClient();
-                KafkaConsumer<String, String> kafkaConsumer = createKafkaConsumer()) {
+        RestHighLevelClient openSearchClient = createOpenSearchClient();
+        KafkaConsumer<String, String> kafkaConsumer = createKafkaConsumer();
+
+        final Thread mainThread = Thread.currentThread();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            log.info("Shutdown...");
+            kafkaConsumer.wakeup();
+
+            // join the main thread
+            try {
+                mainThread.join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }));
+
+        try (openSearchClient; kafkaConsumer) {
             GetIndexRequest getIndexRequest = new GetIndexRequest(INDEX_NAME);
             boolean indexExists = openSearchClient.indices().exists(getIndexRequest, RequestOptions.DEFAULT);
             if (!indexExists) {
@@ -43,19 +63,47 @@ public class OpenSearchConsumer {
                 ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(3000));
                 int recordCount = records.count();
                 log.info("Received {} record(s)", recordCount);
+                BulkRequest bulkRequest = new BulkRequest();
                 for (ConsumerRecord<String, String> record : records) {
                     try {
-                        IndexRequest indexRequest = new IndexRequest(INDEX_NAME).source(record.value(), XContentType.JSON);
-                        IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-                        log.info("Inserted {} document into {} index", indexResponse.getId(), INDEX_NAME);
-                    } catch (Exception ex) {
+                        String id = extractId(record.value());
+                        IndexRequest indexRequest = new IndexRequest(INDEX_NAME)
+                                .source(record.value(), XContentType.JSON)
+                                .id(id);
+                        bulkRequest.add(indexRequest);
+                    } catch (NullPointerException ex) {
                         log.error(ex.getMessage());
                     }
                 }
+                if (bulkRequest.numberOfActions() > 0) {
+                    BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                    log.info("Inserted {} records into {} index", bulkResponse.getItems().length, INDEX_NAME);
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+                kafkaConsumer.commitSync();
+                log.info("Commit offsets");
             }
-        } catch (IOException e) {
-            log.error(e.getMessage(), e);
+        } catch (WakeupException ex) {
+            log.info("Shutdown Consumer...");
+        } catch (Exception ex) {
+            log.error("Unexpected exception in Consumer", ex);
+        } finally {
+            kafkaConsumer.close();
+            log.info("Shutdown Consumer... Done");
         }
+    }
+
+    private static String extractId(String json) {
+        return JsonParser.parseString(json)
+                .getAsJsonObject()
+                .get("meta")
+                .getAsJsonObject()
+                .get("id")
+                .getAsString();
     }
 
     private static KafkaConsumer<String, String> createKafkaConsumer() {
@@ -69,6 +117,7 @@ public class OpenSearchConsumer {
         properties.setProperty("value.deserializer", StringDeserializer.class.getName());
         properties.setProperty("group.id", "consumer-opensearch-demo");
         properties.setProperty("auto.offset.reset", "latest");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         return properties;
     }
 
