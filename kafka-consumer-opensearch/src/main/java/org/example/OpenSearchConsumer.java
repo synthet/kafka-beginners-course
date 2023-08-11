@@ -1,11 +1,6 @@
 package org.example;
 
 import org.apache.http.HttpHost;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -49,10 +44,13 @@ public class OpenSearchConsumer {
                 int recordCount = records.count();
                 log.info("Received {} record(s)", recordCount);
                 for (ConsumerRecord<String, String> record : records) {
-                    IndexRequest indexRequest = new IndexRequest(INDEX_NAME)
-                            .source(record.value(), XContentType.JSON);
-                    IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-                    log.info("Inserted {} document into {} index", indexResponse.getId(), INDEX_NAME);
+                    try {
+                        IndexRequest indexRequest = new IndexRequest(INDEX_NAME).source(record.value(), XContentType.JSON);
+                        IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
+                        log.info("Inserted {} document into {} index", indexResponse.getId(), INDEX_NAME);
+                    } catch (Exception ex) {
+                        log.error(ex.getMessage());
+                    }
                 }
             }
         } catch (IOException e) {
